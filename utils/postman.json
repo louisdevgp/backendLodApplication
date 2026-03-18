@@ -1,0 +1,114 @@
+{
+    "info": {
+      "_postman_id": "12345678-abcd-efgh-ijkl-1234567890ab",
+      "name": "API Gestion Paiements",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+      {
+        "name": "Utilisateurs",
+        "item": [
+          {
+            "name": "Créer un utilisateur",
+            "request": {
+              "method": "POST",
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n    \"email\": \"user@example.com\",\n    \"mot_de_passe\": \"password123\",\n    \"agent_id\": 1\n}"
+              },
+              "url": { "raw": "http://localhost:5000/api/utilisateurs", "host": ["http://localhost:5000"], "path": ["api", "utilisateurs"] }
+            }
+          },
+          {
+            "name": "Récupérer tous les utilisateurs",
+            "request": {
+              "method": "GET",
+              "url": { "raw": "http://localhost:5000/api/utilisateurs", "host": ["http://localhost:5000"], "path": ["api", "utilisateurs"] }
+            }
+          }
+        ]
+      },
+      {
+        "name": "Demandes de Paiement",
+        "item": [
+          {
+            "name": "Créer une demande de paiement",
+            "request": {
+              "method": "POST",
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n    \"agent_id\": 1,\n    \"montant\": 100000,\n    \"motif\": \"Achat de fournitures\",\n    \"requiert_proforma\": \"true\"\n}"
+              },
+              "url": { "raw": "http://localhost:5000/api/demandes", "host": ["http://localhost:5000"], "path": ["api", "demandes"] }
+            }
+          },
+          {
+            "name": "Récupérer toutes les demandes",
+            "request": {
+              "method": "GET",
+              "url": { "raw": "http://localhost:5000/api/demandes", "host": ["http://localhost:5000"], "path": ["api", "demandes"] }
+            }
+          }
+        ]
+      },
+      {
+        "name": "Validations",
+        "item": [
+          {
+            "name": "Valider une demande",
+            "request": {
+              "method": "POST",
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n    \"valideur_id\": 2,\n    \"statut\": \"approuvé\",\n    \"commentaire\": \"Validation du Directeur Général\"\n}"
+              },
+              "url": { "raw": "http://localhost:5000/api/validations/5/valider", "host": ["http://localhost:5000"], "path": ["api", "validations", "5", "valider"] }
+            }
+          },
+          {
+            "name": "Récupérer toutes les validations",
+            "request": {
+              "method": "GET",
+              "url": { "raw": "http://localhost:5000/api/validations", "host": ["http://localhost:5000"], "path": ["api", "validations"] }
+            }
+          }
+        ]
+      },
+      {
+        "name": "Paiements",
+        "item": [
+          {
+            "name": "Effectuer un paiement",
+            "request": {
+              "method": "POST",
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n    \"moyen_paiement\": \"cheque\"\n}"
+              },
+              "url": { "raw": "http://localhost:5000/api/paiements/5", "host": ["http://localhost:5000"], "path": ["api", "paiements", "5"] }
+            }
+          },
+          {
+            "name": "Récupérer tous les paiements",
+            "request": {
+              "method": "GET",
+              "url": { "raw": "http://localhost:5000/api/paiements", "host": ["http://localhost:5000"], "path": ["api", "paiements"] }
+            }
+          }
+        ]
+      }
+    ]
+  }
+  

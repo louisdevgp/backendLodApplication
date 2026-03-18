@@ -1,0 +1,198 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model agents {
+  id                Int                 @id @default(autoincrement())
+  nom               String              @db.VarChar(100)
+  fonction          String              @db.VarChar(50)
+  entite_id         Int?
+  section_id        Int?
+  superieur_id      Int?
+  entites           entites?            @relation(fields: [entite_id], references: [id], onUpdate: Restrict, map: "agents_ibfk_1")
+  sections          sections?           @relation(fields: [section_id], references: [id], onUpdate: Restrict, map: "agents_ibfk_2")
+  agents            agents?             @relation("agentsToagents", fields: [superieur_id], references: [id], onUpdate: Restrict, map: "agents_ibfk_3")
+  other_agents      agents[]            @relation("agentsToagents")
+  demandes_paiement demandes_paiement[]
+  utilisateurs      utilisateurs?
+
+  @@index([entite_id], map: "entite_id")
+  @@index([section_id], map: "section_id")
+  @@index([superieur_id], map: "superieur_id")
+}
+
+model entites {
+  id       Int        @id @default(autoincrement())
+  nom      String     @unique(map: "nom") @db.VarChar(100)
+  agents   agents[]
+  sections sections[]
+}
+
+model roles {
+  id                Int                 @id @default(autoincrement())
+  nom               String              @unique(map: "nom") @db.VarChar(100)
+  role_permissions  role_permissions[]
+  utilisateur_roles utilisateur_roles[]
+}
+
+model validations {
+  id                Int                @id @default(autoincrement())
+  demande_id        Int
+  valideur_id       Int
+  statut            validations_statut
+  commentaire       String?            @db.Text
+  date_validation   DateTime           @default(now()) @db.Timestamp(0)
+  demandes_paiement demandes_paiement  @relation(fields: [demande_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "validations_ibfk_1")
+  utilisateurs      utilisateurs       @relation(fields: [valideur_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "validations_ibfk_2")
+
+  @@index([demande_id], map: "demande_id")
+  @@index([valideur_id], map: "valideur_id")
+}
+
+model demandes_paiement {
+  id                          Int                       @id @default(autoincrement())
+  agent_id                    Int
+  montant                     Decimal                   @db.Decimal(10, 2)
+  motif                       String                    @db.Text
+  beneficiaire                String                    @db.VarChar(255)
+  statut                      demandes_paiement_statut? @default(validation_section)
+  requiert_proforma           Boolean?                  @default(false)
+  date_creation               DateTime                  @default(now()) @db.Timestamp(0)
+  deleted_at                  DateTime?                 @db.DateTime(0)
+  demande_physique_signee_url String?                   @db.VarChar(255)
+  agents                      agents                    @relation(fields: [agent_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "demandes_paiement_ibfk_1")
+  notifications               notifications[]
+  paiements                   paiements[]
+  proformas                   proformas[]
+  validations                 validations[]
+
+  @@index([agent_id], map: "agent_id")
+}
+
+model documents_paiements {
+  id          Int       @id @default(autoincrement())
+  paiement_id Int
+  type        String?   @default("autre") @db.VarChar(100)
+  url         String    @db.VarChar(255)
+  date_ajout  DateTime? @default(now()) @db.Timestamp(0)
+  paiements   paiements @relation(fields: [paiement_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "fk_documents_paiements_paiement_id")
+
+  @@index([paiement_id, type], map: "idx_documents_paiements_paiement_type")
+  @@index([paiement_id], map: "fk_documents_paiements_paiement_id")
+  @@index([paiement_id, date_ajout], map: "idx_documents_paiements_paiement_date")
+}
+
+model notifications {
+  id                Int               @id @default(autoincrement())
+  utilisateur_id    Int
+  demande_id        Int
+  message           String            @db.Text
+  lu                Boolean?          @default(false)
+  date_envoi        DateTime          @default(now()) @db.Timestamp(0)
+  utilisateurs      utilisateurs      @relation(fields: [utilisateur_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "notifications_ibfk_1")
+  demandes_paiement demandes_paiement @relation(fields: [demande_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "notifications_ibfk_2")
+
+  @@index([demande_id], map: "demande_id")
+  @@index([utilisateur_id], map: "utilisateur_id")
+}
+
+model paiements {
+  id                  Int                      @id @default(autoincrement())
+  demande_id          Int
+  moyen_paiement      paiements_moyen_paiement
+  fichiers_paiement   String?                  @db.Text
+  date_paiement       DateTime                 @default(now()) @db.Timestamp(0)
+  documents_paiements documents_paiements[]
+  demandes_paiement   demandes_paiement        @relation(fields: [demande_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "paiements_ibfk_1")
+
+  @@index([demande_id], map: "demande_id")
+  @@index([demande_id, date_paiement], map: "idx_paiements_demande_date")
+}
+
+model permissions {
+  id               Int                @id @default(autoincrement())
+  nom              String             @unique(map: "nom") @db.VarChar(100)
+  role_permissions role_permissions[]
+}
+
+model proformas {
+  id                Int               @id @default(autoincrement())
+  demande_id        Int
+  fichier           String            @db.VarChar(255)
+  date_ajout        DateTime          @default(now()) @db.Timestamp(0)
+  demandes_paiement demandes_paiement @relation(fields: [demande_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "proformas_ibfk_1")
+
+  @@index([demande_id], map: "demande_id")
+}
+
+model role_permissions {
+  role_id       Int
+  permission_id Int
+  roles         roles       @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "role_permissions_ibfk_1")
+  permissions   permissions @relation(fields: [permission_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "role_permissions_ibfk_2")
+
+  @@id([role_id, permission_id])
+  @@index([permission_id], map: "permission_id")
+}
+
+model sections {
+  id        Int      @id @default(autoincrement())
+  nom       String   @unique(map: "nom") @db.VarChar(100)
+  entite_id Int
+  agents    agents[]
+  entites   entites  @relation(fields: [entite_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "sections_ibfk_1")
+
+  @@index([entite_id], map: "entite_id")
+}
+
+model utilisateur_roles {
+  utilisateur_id Int
+  role_id        Int
+  utilisateurs   utilisateurs @relation(fields: [utilisateur_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "utilisateur_roles_ibfk_1")
+  roles          roles        @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "utilisateur_roles_ibfk_2")
+
+  @@id([utilisateur_id, role_id])
+  @@index([role_id], map: "role_id")
+}
+
+model utilisateurs {
+  id                Int                 @id @default(autoincrement())
+  email             String              @unique(map: "email") @db.VarChar(100)
+  mot_de_passe      String              @db.VarChar(255)
+  agent_id          Int                 @unique(map: "agent_id")
+  signature         String?             @db.VarChar(255)
+  reset_token       String?             @db.VarChar(255)
+  reset_expires     DateTime?           @db.DateTime(0)
+  notifications     notifications[]
+  utilisateur_roles utilisateur_roles[]
+  agents            agents              @relation(fields: [agent_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "utilisateurs_ibfk_1")
+  validations       validations[]
+}
+
+enum paiements_moyen_paiement {
+  cheque
+  mobile_money
+  especes
+  virement_bancaire
+}
+
+enum validations_statut {
+  approuve
+  rejete
+}
+
+enum demandes_paiement_statut {
+  validation_section
+  validation_entite
+  validation_entite_finance
+  validation_entite_generale
+  approuve
+  paye
+  rejete
+  en_attente_paiement
+}
