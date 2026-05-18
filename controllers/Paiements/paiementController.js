@@ -8,6 +8,12 @@ const path = require("path");
 const jwt = require("jsonwebtoken");
 const { telechargerFichier } = require("../../config/telechargerFiles");
 
+const achatDemandeRef = (id) => `ACHAT - DEMANDE #${id}`;
+const achatMailSubject = (id, action = "") =>
+  action ? `${achatDemandeRef(id)} - ${action}` : achatDemandeRef(id);
+const achatMailTitleHtml = (id) =>
+  `<p style="margin:0 0 12px;font-weight:700;text-transform:uppercase;">${achatDemandeRef(id)}</p>`;
+
 /**
  * ✅ Upload multiple fichiers sur Cloudinary
  */
@@ -213,9 +219,10 @@ const effectuerPaiement = async (req, res) => {
     }
 
     // 📝 Message
-    const sujet = `💰 Paiement confirmé - Demande #${demande.id}`;
+    const sujet = achatMailSubject(demande.id, "PAIEMENT CONFIRME");
     const message = `
       <p>Bonjour ${agent.nom},</p>
+      ${achatMailTitleHtml(demande.id)}
       <p>Votre demande de paiement a été enregistrée comme <strong>payée</strong>.</p>
       <p><strong>Moyen utilisé :</strong> ${moyen_paiement}</p>
       <p>Veuillez trouver en pièces jointes :</p>

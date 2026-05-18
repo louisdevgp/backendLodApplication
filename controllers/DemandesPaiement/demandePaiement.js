@@ -11,6 +11,12 @@ async function sendEmail(to, subject, html, attachments = [], ccEmails = []) {
   return envoyerEmail(to, subject, html, attachments, ccEmails);
 }
 
+const achatDemandeRef = (id) => `ACHAT - DEMANDE #${id}`;
+const achatMailSubject = (id, action = "") =>
+  action ? `${achatDemandeRef(id)} - ${action}` : achatDemandeRef(id);
+const achatMailTitleHtml = (id) =>
+  `<p style="margin:0 0 12px;font-weight:700;text-transform:uppercase;">${achatDemandeRef(id)}</p>`;
+
 // === Upload Cloudinary
 const uploadToCloudinary = (fileBuffer) => {
   return new Promise((resolve, reject) => {
@@ -314,9 +320,10 @@ const creerDemandePaiement = async (req, res) => {
 
     if (validateur) {
       const validationURL = `https://achats.greenpayci.com/valider/${demandeCree.id}`;
-      const sujet = `Nouvelle demande de paiement #${demandeCree.id} en attente`;
+      const sujet = achatMailSubject(demandeCree.id, "NOUVELLE DEMANDE");
       const message = `
         <p>Bonjour ${validateur.agents.nom},</p>
+        ${achatMailTitleHtml(demandeCree.id)}
         <p>Une nouvelle demande de paiement a été créée par <strong>${agent.nom}</strong>.</p>
         <p><strong>Montant :</strong> ${montantNum || montant} FCFA</p>
         <p><strong>Motif :</strong> ${motif}</p>
@@ -658,9 +665,10 @@ const modifierDemandePaiement = async (req, res) => {
           emailOf(chainData.dg),
         ]).filter((e) => e !== to);
 
-        const sujet = `🕐 En attente de paiement – Demande #${result.id}`;
+        const sujet = achatMailSubject(result.id, "EN ATTENTE DE PAIEMENT");
         const message = `
           <p>Bonjour,</p>
+          ${achatMailTitleHtml(result.id)}
           <p>La demande <strong>#${result.id}</strong> est <strong>en attente de paiement</strong>.</p>
           <p><strong>Montant :</strong> ${result.montant} FCFA<br/>
              <strong>Motif :</strong> ${result.motif}<br/>
@@ -701,9 +709,10 @@ const modifierDemandePaiement = async (req, res) => {
           )
           .join("");
 
-        const sujet = `✅ Paiement effectué – Demande #${result.id}`;
+        const sujet = achatMailSubject(result.id, "PAIEMENT EFFECTUE");
         const message = `
           <p>Bonjour,</p>
+          ${achatMailTitleHtml(result.id)}
           <p>Le paiement de la demande <strong>#${result.id}</strong> a été <strong>effectué</strong>.</p>
           <p><strong>Montant :</strong> ${result.montant} FCFA<br/>
              <strong>Motif :</strong> ${result.motif}</p>
@@ -737,9 +746,10 @@ const modifierDemandePaiement = async (req, res) => {
           emailOf(chainData.daf),
         ]).filter((e) => e && e !== to);
 
-        const sujet = `❌ Demande #${result.id} rejetée`;
+        const sujet = achatMailSubject(result.id, "REJETEE");
         const message = `
           <p>Bonjour,</p>
+          ${achatMailTitleHtml(result.id)}
           <p>La demande <strong>#${result.id}</strong> a été <strong>rejetée</strong>.</p>
           <p><strong>Montant :</strong> ${result.montant} FCFA<br/>
              <strong>Motif (demande) :</strong> ${result.motif}</p>

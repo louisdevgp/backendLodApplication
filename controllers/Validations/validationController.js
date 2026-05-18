@@ -9,6 +9,11 @@ const cloudinary = require("../../config/cloudinaryConfig");
  * 🔗 Lien vers la page de la demande (front)
  */
 const appLienDemande = (id) => `https://achats.greenpayci.com/demandes/${id}`;
+const achatDemandeRef = (id) => `ACHAT - DEMANDE #${id}`;
+const achatMailSubject = (id, action = "") =>
+  action ? `${achatDemandeRef(id)} - ${action}` : achatDemandeRef(id);
+const achatMailTitleHtml = (id) =>
+  `<p style="margin:0 0 12px;font-weight:700;text-transform:uppercase;">${achatDemandeRef(id)}</p>`;
 
 /**
  * 🔎 Infère un attachment nodemailer correct depuis une URL
@@ -167,9 +172,10 @@ async function notifyAllNextValidators(demandeId, options = {}) {
   console.log("[MAIL] Nombre de pièces jointes:", attachments.length);
 
   const lien = appLienDemande(demandeFull.id);
-  const sujet = `🔔 Validation requise – Demande #${demandeFull.id}`;
+  const sujet = achatMailSubject(demandeFull.id, "VALIDATION REQUISE");
   const message = `
     <p>Bonjour,</p>
+    ${achatMailTitleHtml(demandeFull.id)}
     <p>La demande #${demandeFull.id} est en attente de votre validation.</p>
     <p><strong>Montant :</strong> ${demandeFull.montant} FCFA</p>
     <p><strong>Motif :</strong> ${demandeFull.motif}</p>
@@ -416,9 +422,10 @@ const validerDemande = async (req, res) => {
     if (statut === "approuve" && prochainStatut === "validation_entite_generale") {
       const emailDemandeur = demandeMaj?.agents?.utilisateurs?.email;
       if (emailDemandeur) {
-        const sujetReg = `📄 Étape papier (REG) – Demande #${demande.id}`;
+        const sujetReg = achatMailSubject(demande.id, "ETAPE PAPIER REG");
         const messageReg = `
           <p>Bonjour ${demandeMaj.agents?.nom || "Demandeur"},</p>
+          ${achatMailTitleHtml(demande.id)}
           <p>Votre demande a atteint l'étape <strong>validation_entite_generale</strong>.</p>
           <p>Veuillez <strong>imprimer la fiche</strong> et la faire signer par le <strong>Responsable d'entité générale (REG)</strong>.</p>
           <p>Après signature, importez le document signé dans l'application afin de passer la demande à <strong>en_attente_paiement</strong>.</p>
@@ -435,9 +442,10 @@ const validerDemande = async (req, res) => {
 
     // c) Si rejet → mail au demandeur (avec proformas en PJ pour contexte)
     if (statut === "rejete" && demande.agents?.utilisateurs?.email) {
-      const sujetRejet = `🚨 Votre demande de paiement #${demande.id} a été rejetée`;
+      const sujetRejet = achatMailSubject(demande.id, "REJETEE");
       const messageRejet = `
         <p>Bonjour ${demande.agents?.nom || "Demandeur"},</p>
+        ${achatMailTitleHtml(demande.id)}
         <p>Votre demande de paiement a été <strong>rejetée</strong> par <strong>${valideur.agents?.nom || "le validateur"}</strong>.</p>
         <p><strong>Montant :</strong> ${demande.montant} FCFA</p>
         <p><strong>Motif :</strong> ${demande.motif}</p>
