@@ -1,27 +1,34 @@
-const { PrismaClient } = require("@prisma/client");
+﻿const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient()
 const {envoyerEmail} = require("../config/emailConfig")
+const { formatDemandeMailSubject, formatDemandeMailTitleHtml } = require("./demandeMailFormat");
 
 
 
 const envoyerNotification = async (utilisateur_id, demande_id, message) => {
     try {
-        // Récupérer l'email de l'utilisateur concerné
+        // RÃ©cupÃ©rer l'email de l'utilisateur concernÃ©
         const utilisateur = await prisma.utilisateurs.findUnique({
             where: { id: utilisateur_id },
             select: { email: true }
         });
 
         if (!utilisateur) {
-            console.warn("❌ Utilisateur non trouvé pour la notification.");
+            console.warn("âŒ Utilisateur non trouvÃ© pour la notification.");
             return;
         }
 
         // Envoyer l'email
-        const sujet = `Nouvelle Notification - Demande de Paiement #${demande_id}`;
-        await envoyerEmail(utilisateur.email, sujet, message);
+        const sujet = formatDemandeMailSubject(demande_id, "NOTIFICATION");
+        const mailTitle = formatDemandeMailTitleHtml(demande_id);
+        const html = `
+          <p>Bonjour,</p>
+          ${mailTitle}
+          ${message || ""}
+        `;
+        await envoyerEmail(utilisateur.email, sujet, html);
     } catch (error) {
-        console.error("❌ Erreur lors de l'envoi de la notification par email :", error);
+        console.error("âŒ Erreur lors de l'envoi de la notification par email :", error);
     }
 };
 
@@ -33,7 +40,7 @@ async function envoyerFichiersParMail(demandeId) {
         agents: {
           include: {
             utilisateurs: true,
-            agents: { include: { utilisateurs: true } }, // supérieur direct
+            agents: { include: { utilisateurs: true } }, // supÃ©rieur direct
           },
         },
         paiements: {
@@ -46,15 +53,15 @@ async function envoyerFichiersParMail(demandeId) {
     });
 
     if (!demande) {
-      console.warn("❌ Demande introuvable pour envoi mail");
+      console.warn("âŒ Demande introuvable pour envoi mail");
       return;
     }
 
-    // 📦 Construction de la liste des fichiers
+    // ðŸ“¦ Construction de la liste des fichiers
     const fichiers = [];
 
     if (demande.demande_physique_signee_url) {
-      fichiers.push({ label: "Fichier signé (REG)", url: demande.demande_physique_signee_url });
+      fichiers.push({ label: "Fichier signÃ© (REG)", url: demande.demande_physique_signee_url });
     }
 
     for (const paiement of demande.paiements) {
@@ -68,11 +75,11 @@ async function envoyerFichiersParMail(demandeId) {
     }
 
     if (fichiers.length === 0) {
-      console.warn("⚠️ Aucun fichier à envoyer par e-mail.");
+      console.warn("âš ï¸ Aucun fichier Ã  envoyer par e-mail.");
       return;
     }
 
-    // 🧑‍💼 Récupération des e-mails des parties prenantes
+    // ðŸ§‘â€ðŸ’¼ RÃ©cupÃ©ration des e-mails des parties prenantes
     const emails = new Set();
 
     if (demande.agents.utilisateurs?.email) {
@@ -80,42 +87,42 @@ async function envoyerFichiersParMail(demandeId) {
     }
 
     if (demande.agents.agents?.utilisateurs?.email) {
-      emails.add(demande.agents.agents.utilisateurs.email); // Supérieur direct
+      emails.add(demande.agents.agents.utilisateurs.email); // SupÃ©rieur direct
     }
 
-    // ✅ Tu peux ajouter ici plus d'e-mails à notifier (ex: DG, DAF...)
+    // âœ… Tu peux ajouter ici plus d'e-mails Ã  notifier (ex: DG, DAF...)
 
     if (emails.size === 0) {
-      console.warn("❌ Aucun e-mail à notifier.");
+      console.warn("âŒ Aucun e-mail Ã  notifier.");
       return;
     }
 
-    // ✉️ Envoi d’e-mail avec les fichiers
+    // âœ‰ï¸ Envoi dâ€™e-mail avec les fichiers
 
 
-    const message = {
-      from: `"GreenPay CI" <${process.env.EMAIL_USER}>`,
-      to: Array.from(emails).join(","),
-      subject: `📄 Fichiers associés à la demande #${demandeId}`,
-      html: `
-        <p>Bonjour,</p>
-        <p>Voici les fichiers liés à la demande de paiement #${demandeId} :</p>
-        <ul>
-          ${fichiers.map(f => `<li><strong>${f.label}:</strong> <a href="${f.url}">${f.url}</a></li>`).join("")}
-        </ul>
-        <p>Cordialement,<br>L’équipe GreenPay</p>
-      `,
-    };
+        const subject = formatDemandeMailSubject(demandeId, "FICHIERS ASSOCIES");
+    const mailTitle = formatDemandeMailTitleHtml(demandeId);
+    const html = `
+      <p>Bonjour,</p>
+      ${mailTitle}
+      <p>Voici les fichiers lies a cette demande :</p>
+      <ul>
+        ${fichiers.map(f => `<li><strong>${f.label}:</strong> <a href="${f.url}">${f.url}</a></li>`).join("")}
+      </ul>
+      <p>Cordialement,<br/>GreenPay CI</p>
+    `;
 
-    await envoyerEmail(message);
-    console.log("✅ E-mail envoyé avec succès aux parties prenantes.");
+    const recipients = Array.from(emails);
+    const to = recipients[0];
+    const cc = recipients.slice(1);
+    await envoyerEmail(to, subject, html, [], cc);
+    console.log("âœ… E-mail envoyÃ© avec succÃ¨s aux parties prenantes.");
   } catch (error) {
-    console.error("🚨 Erreur lors de l'envoi d'e-mail :", error);
+    console.error("ðŸš¨ Erreur lors de l'envoi d'e-mail :", error);
   }
 }
 
 module.exports = { envoyerNotification, envoyerFichiersParMail };
-
 
 
 

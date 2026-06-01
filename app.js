@@ -1,5 +1,6 @@
 // Import des modules nécessaires
 const express = require('express');
+const path = require('path');
 const { PrismaClient } = require('@prisma/client');
 const dotenv = require('dotenv');
 const cors = require('cors');
@@ -13,6 +14,9 @@ const fonctionsRoutes = require('./routes/Fonctions/fonctionsRoutes')
 const rolesPermissionsRoutes = require('./routes/RolesPermissionsRoutes/rolesPermissionsRoutes')
 const rolesUSerRoutes = require('./routes/RolesUtilisateursRoutes/rolesUtilisateursRoutes')
 const paiementsRoutes = require('./routes/Paiements/paiementRoutes')
+const achatsRoutes = require('./routes/Achats/achatsRoutes')
+const adminRoutes = require('./routes/Admin/adminRoutes')
+const notificationsRoutes = require('./routes/Notifications/notificationsRoutes')
 
 // News routes
 const entitesRoutes = require("./routes/Entites/entitesRoutes")
@@ -32,7 +36,8 @@ app.use(cors(
     
 ));
 app.use(morgan('dev'));
-app.use(helmet());
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Initialisation de Prisma
 const prisma = new PrismaClient();
@@ -58,6 +63,9 @@ app.use('/api/fonctions',fonctionsRoutes)
 app.use('/api/rolesPermissions',rolesPermissionsRoutes)
 app.use('/api/rolesUsers',rolesUSerRoutes)
 app.use('/api/paiements',paiementsRoutes)
+app.use('/api/achats',achatsRoutes)
+app.use('/api/admin',adminRoutes)
+app.use('/api/notifications', notificationsRoutes)
 
 // New routes
 app.use("/api/entites",entitesRoutes)

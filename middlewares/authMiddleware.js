@@ -1,92 +1,110 @@
 const { PrismaClient } = require("@prisma/client");
-const prisma = new PrismaClient();
 const jwt = require("jsonwebtoken");
 
-// ✅ Middleware pour vérifier si l'utilisateur est authentifié
+const prisma = new PrismaClient();
+
+const normalizeName = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[_\s]+/g, " ");
+
 const verifyToken = (req, res, next) => {
-    const token = req.header("Authorization");
-    
-    if (!token) {
-        return res.status(401).json({ message: "Accès refusé. Token manquant." });
-    }
+  const authorization = req.header("Authorization");
 
-    try {
-        const verified = jwt.verify(token.split(" ")[1], process.env.JWT_SECRET);
-        req.user = verified;
-        next();
-    } catch (error) {
-        res.status(400).json({ message: "Token invalide." });
-    }
+  if (!authorization) {
+    return res.status(401).json({ message: "Acces refuse. Token manquant." });
+  }
+
+  try {
+    const token = authorization.startsWith("Bearer ")
+      ? authorization.split(" ")[1]
+      : authorization;
+    const verified = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = { ...verified, id: verified.userId || verified.id };
+    next();
+  } catch (error) {
+    return res.status(400).json({ message: "Token invalide." });
+  }
 };
 
-// ✅ Middleware pour vérifier si l'utilisateur a un rôle spécifique
 const hasRole = (roleName) => {
-    return async (req, res, next) => {
-        try {
-            const utilisateur = await prisma.utilisateurs.findUnique({
-                where: { id: req.user.id },
-                include: {
-                    utilisateur_roles: {
-                        include: { roles: true }
-                    }
-                }
-            });
+  return async (req, res, next) => {
+    try {
+      const utilisateur = await prisma.utilisateurs.findUnique({
+        where: { id: Number(req.user.id) },
+        include: {
+          utilisateur_roles: {
+            include: { roles: true },
+          },
+        },
+      });
 
-            if (!utilisateur) {
-                return res.status(403).json({ message: "Utilisateur non trouvé." });
-            }
+      if (!utilisateur) {
+        return res.status(403).json({ message: "Utilisateur non trouve." });
+      }
 
-            const hasRequiredRole = utilisateur.utilisateur_roles.some((role) => role.roles.nom === roleName);
+      const expectedRoles = Array.isArray(roleName) ? roleName : [roleName];
+      const expectedRoleSet = new Set(
+        expectedRoles.map((name) => normalizeName(name)).filter(Boolean)
+      );
+      const hasRequiredRole = utilisateur.utilisateur_roles.some((role) =>
+        expectedRoleSet.has(normalizeName(role.roles.nom))
+      );
 
-            if (!hasRequiredRole) {
-                return res.status(403).json({ message: "Accès refusé. Rôle insuffisant." });
-            }
+      if (!hasRequiredRole) {
+        return res.status(403).json({ message: "Acces refuse. Role insuffisant." });
+      }
 
-            next();
-        } catch (error) {
-            res.status(500).json({ message: "Erreur serveur", error });
-        }
-    };
+      next();
+    } catch (error) {
+      return res.status(500).json({ message: "Erreur serveur", error });
+    }
+  };
 };
 
-// ✅ Middleware pour vérifier si l'utilisateur a une permission spécifique
 const hasPermission = (permissionName) => {
-    return async (req, res, next) => {
-        try {
-            const utilisateur = await prisma.utilisateurs.findUnique({
-                where: { id: req.user.id },
+  return async (req, res, next) => {
+    try {
+      const utilisateur = await prisma.utilisateurs.findUnique({
+        where: { id: Number(req.user.id) },
+        include: {
+          utilisateur_roles: {
+            include: {
+              roles: {
                 include: {
-                    utilisateur_roles: {
-                        include: {
-                            roles: {
-                                include: {
-                                    role_permissions: {
-                                        include: { permissions: true }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            });
+                  role_permissions: {
+                    include: { permissions: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
 
-            if (!utilisateur) {
-                return res.status(403).json({ message: "Utilisateur non trouvé." });
-            }
+      if (!utilisateur) {
+        return res.status(403).json({ message: "Utilisateur non trouve." });
+      }
 
-            const hasRequiredPermission = utilisateur.utilisateur_roles.some((role) =>
-                role.roles.role_permissions.some((rp) => rp.permissions.nom === permissionName)
-            );
+      const expectedPermission = normalizeName(permissionName);
+      const hasRequiredPermission = utilisateur.utilisateur_roles.some((role) =>
+        role.roles.role_permissions.some(
+          (rp) => normalizeName(rp.permissions.nom) === expectedPermission
+        )
+      );
 
-            if (!hasRequiredPermission) {
-                return res.status(403).json({ message: "Accès refusé. Permission insuffisante." });
-            }
+      if (!hasRequiredPermission) {
+        return res.status(403).json({ message: "Acces refuse. Permission insuffisante." });
+      }
 
-            next();
-        } catch (error) {
-            res.status(500).json({ message: "Erreur serveur", error });
-        }
-    };
+      next();
+    } catch (error) {
+      return res.status(500).json({ message: "Erreur serveur", error });
+    }
+  };
 };
 
-module.exports = { verifyToken, hasRole, hasPermission };
+module.exports = { verifyToken, hasRole, hasPermission, normalizeName };

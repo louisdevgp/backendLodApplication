@@ -1,22 +1,13 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 
-const cloudinary = require("../../config/cloudinaryConfig");
 const { envoyerEmail } = require("../../config/emailConfig");
+const { saveBufferToLocalFile } = require("../../utils/localUpload");
 
-const uploadToCloudinary = (fileBuffer) => {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder: "proformas" },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result.secure_url);
-      }
-    );
-    stream.end(fileBuffer);
-  });
+const uploadProformaLocal = async (req, file) => {
+  const saved = await saveBufferToLocalFile(req, file.buffer, file.originalname || "proforma", "proformas");
+  return saved.url;
 };
-
 function determinerStatutInitial(agent) {
   let statutInitial = "validation_section";
   if (agent.fonction.includes("Responsable de section")) {
@@ -41,7 +32,7 @@ const creerDemandePaiement = async (req, res) => {
 
     let proformaUrl = null;
     if (requiert_proforma === "true" && req.file) {
-      proformaUrl = await uploadToCloudinary(req.file.buffer);
+      proformaUrl = await uploadProformaLocal(req, req.file);
     }
 
     const demande = await prisma.$transaction(async (tx) => {
@@ -142,7 +133,7 @@ const modifierDemandePaiement = async (req, res) => {
 
     let proformaUrl = null;
     if (requiert_proforma === "true" && req.file) {
-      proformaUrl = await uploadToCloudinary(req.file.buffer);
+      proformaUrl = await uploadProformaLocal(req, req.file);
       if (demande.proformas.length > 0) {
         await prisma.proformas.deleteMany({ where: { demande_id: parseInt(demande_id) } });
       }
@@ -342,3 +333,4 @@ module.exports = {
   // demandesCountByReg,
   // demandesCountByResponsableEntite,
 };
+

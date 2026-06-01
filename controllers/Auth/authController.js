@@ -3,10 +3,29 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { validationResult } = require("express-validator");
 const { envoyerEmail } = require("../../config/emailConfig");
-const cloudinary = require("../../config/cloudinaryConfig");
-require("crypto");
+const crypto = require("crypto");
+const { saveBufferToLocalFile } = require("../../utils/localUpload");
 
 const prisma = new PrismaClient();
+
+const cleanName = (value) => String(value || "").trim();
+
+const formatUser = (user) => {
+  const roles = (user.utilisateur_roles || [])
+    .map((ur) => cleanName(ur.roles?.nom))
+    .filter(Boolean);
+  const permissions = [
+    ...new Set(
+      (user.utilisateur_roles || []).flatMap((ur) =>
+        (ur.roles?.role_permissions || [])
+          .map((rp) => cleanName(rp.permissions?.nom))
+          .filter(Boolean)
+      )
+    ),
+  ];
+
+  return { ...user, roles, permissions };
+};
 
 /** ✅ REGISTER (Créer un compte) */
 const register = async (req, res) => {
@@ -40,7 +59,20 @@ const login = async (req, res) => {
     const { email, mot_de_passe } = req.body;
     const user = await prisma.utilisateurs.findUnique({
       where: { email },
-      include: { agents: true },
+      include: {
+        agents: true,
+        utilisateur_roles: {
+          include: {
+            roles: {
+              include: {
+                role_permissions: {
+                  include: { permissions: true },
+                },
+              },
+            },
+          },
+        },
+      },
     });
 
     if (!user)
@@ -54,7 +86,7 @@ const login = async (req, res) => {
       expiresIn: "7d",
     });
 
-    res.status(200).json({ message: "Connexion réussie.", token, user });
+    res.status(200).json({ message: "Connexion réussie.", token, user: formatUser(user) });
   } catch (error) {
     res.status(500).json({ message: "Erreur serveur.", error });
   }
@@ -163,15 +195,15 @@ const uploadSignature = async (req, res) => {
     if (!req.file)
       return res.status(400).json({ message: "Aucun fichier envoyé." });
 
-    const result = await cloudinary.uploader.upload(req.file.path);
+    const saved = await saveBufferToLocalFile(req, req.file.buffer, req.file.originalname || "signature", "signatures");
     await prisma.utilisateurs.update({
       where: { id: Number(id) },
-      data: { signature: result.secure_url },
+      data: { signature: saved.url },
     });
 
     res
       .status(200)
-      .json({ message: "Signature mise à jour.", url: result.secure_url });
+      .json({ message: "Signature mise à jour.", url: saved.url });
   } catch (error) {
     res.status(500).json({ message: "Erreur serveur.", error });
   }
@@ -262,3 +294,4 @@ module.exports = {
   deleteUser,
   changePassword,
 };
+

@@ -3,10 +3,7 @@ const prisma = new PrismaClient();
 const { collectProformaFilesFromReq } = require("../../utils/reqFiles");
 const { parseId } = require("../../utils/parse");
 const { asyncHandler } = require("../../utils/http");
-const { uploadBuffer } = require("../../utils/cloudinary"); 
-
-
-
+const { saveBufferToLocalFile, deleteLocalFileByUrl } = require("../../utils/localUpload");
 const ajouterProformas=  asyncHandler(async (req, res) => {
   const demandeId = parseId(req.params.id);
   if (!demandeId) return res.status(400).json({ message: "Paramètre id invalide." });
@@ -26,7 +23,8 @@ const ajouterProformas=  asyncHandler(async (req, res) => {
   const uploads = [];
   for (const f of files) {
     if (!f?.buffer) continue;
-    const url = await uploadBuffer(f.buffer, f.originalname || "proforma");
+    const saved = await saveBufferToLocalFile(req, f.buffer, f.originalname || "proforma", "proformas");
+    const url = saved.url;
     uploads.push({ url, name: f.originalname || null });
   }
 
@@ -78,11 +76,10 @@ const supprimerProforma = asyncHandler(async (req, res) => {
   if (!pf) return res.status(404).json({ message: "Proforma introuvable." });
 
   await prisma.proformas.delete({ where: { id: proformaId } });
-
-  // suppression distante non bloquante
+  // Suppression locale non bloquante
   if (pf.fichier) {
-    deleteByUrl(pf.fichier).catch((e) =>
-      console.warn("Suppression distante échouée (non bloquant):", e?.message || e)
+    deleteLocalFileByUrl(pf.fichier).catch((e) =>
+      console.warn("Suppression fichier local echouee (non bloquant):", e?.message || e)
     );
   }
 
@@ -95,5 +92,6 @@ module.exports = {
     listerProformas,
     supprimerProforma
 }
+
 
 

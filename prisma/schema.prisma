@@ -59,6 +59,7 @@ model demandes_paiement {
   agent_id                    Int
   montant                     Decimal                   @db.Decimal(10, 2)
   motif                       String                    @db.Text
+  note                        String?                   @db.Text
   beneficiaire                String                    @db.VarChar(255)
   statut                      demandes_paiement_statut? @default(validation_section)
   requiert_proforma           Boolean?                  @default(false)
@@ -67,11 +68,25 @@ model demandes_paiement {
   demande_physique_signee_url String?                   @db.VarChar(255)
   agents                      agents                    @relation(fields: [agent_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "demandes_paiement_ibfk_1")
   notifications               notifications[]
+  achats                      achats?
   paiements                   paiements[]
   proformas                   proformas[]
   validations                 validations[]
 
   @@index([agent_id], map: "agent_id")
+}
+
+model achats {
+  id                Int               @id @default(autoincrement())
+  demande_id        Int               @unique(map: "uniq_achat_demande")
+  acheteur_id       Int
+  commentaire       String?           @db.Text
+  date_achat        DateTime          @default(now()) @db.Timestamp(0)
+  demandes_paiement demandes_paiement @relation(fields: [demande_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "fk_achats_demande")
+  utilisateurs      utilisateurs      @relation(fields: [acheteur_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "fk_achats_acheteur")
+  preuves_achat     preuves_achat[]
+
+  @@index([acheteur_id], map: "idx_achats_acheteur")
 }
 
 model documents_paiements {
@@ -130,6 +145,18 @@ model proformas {
   @@index([demande_id], map: "demande_id")
 }
 
+model preuves_achat {
+  id          Int       @id @default(autoincrement())
+  achat_id    Int
+  type        String?   @default("autre") @db.VarChar(100)
+  url         String    @db.VarChar(255)
+  nom_fichier String?   @db.VarChar(255)
+  date_ajout  DateTime? @default(now()) @db.Timestamp(0)
+  achats      achats    @relation(fields: [achat_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "fk_preuves_achat")
+
+  @@index([achat_id], map: "idx_preuves_achat")
+}
+
 model role_permissions {
   role_id       Int
   permission_id Int
@@ -169,6 +196,7 @@ model utilisateurs {
   reset_token       String?             @db.VarChar(255)
   reset_expires     DateTime?           @db.DateTime(0)
   notifications     notifications[]
+  achats            achats[]
   utilisateur_roles utilisateur_roles[]
   agents            agents              @relation(fields: [agent_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "utilisateurs_ibfk_1")
   validations       validations[]
@@ -179,6 +207,7 @@ enum paiements_moyen_paiement {
   mobile_money
   especes
   virement_bancaire
+  carte_recharge
 }
 
 enum validations_statut {
@@ -193,6 +222,8 @@ enum demandes_paiement_statut {
   validation_entite_generale
   approuve
   paye
+  achat_effectue
+  cloture
   rejete
   en_attente_paiement
 }

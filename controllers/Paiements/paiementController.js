@@ -1,36 +1,77 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
-const cloudinary = require("../../config/cloudinaryConfig");
 const { envoyerEmail } = require("../../config/emailConfig");
+const { saveBufferToLocalFile } = require("../../utils/localUpload");
+const { PAYMENT_METHOD_VALUES, formatPaymentMethodLabel } = require("../../utils/paymentLabels");
+const { notifyAcheteursDemandeEnAttenteAchat } = require("../../utils/achatWorkflowNotifications");
+const {
+  formatDemandeMailSubject,
+  formatDemandeMailTitleHtml,
+  formatDemandeInAppMessage,
+} = require("../../utils/demandeMailFormat");
+const { createNotificationsForUsers } = require("../../utils/inAppNotifications");
 
 const { generateDemandePaiementPDF } = require("../../utils/pdf");
 const path = require("path");
 const jwt = require("jsonwebtoken");
 const { telechargerFichier } = require("../../config/telechargerFiles");
 
-const achatDemandeRef = (id) => `ACHAT - DEMANDE #${id}`;
-const achatMailSubject = (id, action = "") =>
-  action ? `${achatDemandeRef(id)} - ${action}` : achatDemandeRef(id);
-const achatMailTitleHtml = (id) =>
-  `<p style="margin:0 0 12px;font-weight:700;text-transform:uppercase;">${achatDemandeRef(id)}</p>`;
+const uploadPaiementFilesLocal = async (req, files = []) => {
+  const urls = [];
+  for (const file of files) {
+    if (!file?.buffer) continue;
+    const saved = await saveBufferToLocalFile(req, file.buffer, file.originalname || "preuve_paiement", "paiements");
+    urls.push(saved.url);
+  }
+  return urls;
+};
 
-/**
- * ✅ Upload multiple fichiers sur Cloudinary
- */
-const uploadToCloudinary = async (files) => {
-  const uploadPromises = files.map((file) => {
-    return new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        { folder: "paiements" },
-        (error, result) => {
-          if (error) reject(error);
-          else resolve(result.secure_url);
-        }
-      );
-      stream.end(file.buffer);
+const toPositiveInt = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return Math.floor(num);
+};
+
+const uniquePositiveIds = (values = []) =>
+  Array.from(
+    new Set(
+      (values || [])
+        .map((value) => toPositiveInt(value))
+        .filter((value) => value != null)
+    )
+  );
+
+const getStakeholderUserIdsFromAgent = async (agent) => {
+  if (!agent) return [];
+
+  const hierarchyFilters = [];
+  if (agent.superieur_id) hierarchyFilters.push({ id: Number(agent.superieur_id) });
+  if (agent.section_id) {
+    hierarchyFilters.push({
+      section_id: Number(agent.section_id),
+      fonction: { contains: "Responsable de section" },
     });
-  });
-  return await Promise.all(uploadPromises);
+  }
+  if (agent.entite_id) {
+    hierarchyFilters.push({
+      entite_id: Number(agent.entite_id),
+      fonction: { contains: "Responsable d'entit" },
+    });
+  }
+  hierarchyFilters.push({ fonction: { contains: "Directeur" } });
+
+  const hierarchyAgents = hierarchyFilters.length
+    ? await prisma.agents.findMany({
+        where: { OR: hierarchyFilters },
+        include: { utilisateurs: true },
+      })
+    : [];
+
+  return uniquePositiveIds([
+    agent.utilisateurs?.id,
+    agent.agents?.utilisateurs?.id,
+    ...hierarchyAgents.map((a) => a.utilisateurs?.id),
+  ]);
 };
 
 /**
@@ -74,7 +115,7 @@ const uploadToCloudinary = async (files) => {
 
 //     let fichiersPreuve = [];
 //     if (req.files && req.files.length > 0) {
-//       fichiersPreuve = await uploadToCloudinary(req.files);
+//       fichiersPreuve = await uploadPaiementFilesLocal(req, req.files);
 //     }
 
 //     const paiement = await prisma.paiements.create({
@@ -128,6 +169,10 @@ const effectuerPaiement = async (req, res) => {
   const utilisateur = jwt.decode(token);
 
   try {
+    if (!PAYMENT_METHOD_VALUES.includes(moyen_paiement)) {
+      return res.status(400).json({ message: "Moyen de paiement invalide." });
+    }
+
     const user = await prisma.utilisateurs.findUnique({
       where: { id: parseInt(utilisateur.userId) },
       include: { agents: true },
@@ -155,7 +200,7 @@ const effectuerPaiement = async (req, res) => {
 
     let fichiersPreuve = [];
     if (req.files && req.files.length > 0) {
-      fichiersPreuve = await uploadToCloudinary(req.files);
+      fichiersPreuve = await uploadPaiementFilesLocal(req, req.files);
     }
 
     const paiement = await prisma.paiements.create({
@@ -170,6 +215,12 @@ const effectuerPaiement = async (req, res) => {
       where: { id: parseInt(demande_id) },
       data: { statut: "paye" },
     });
+
+    try {
+      await notifyAcheteursDemandeEnAttenteAchat({ demandeId: demande_id });
+    } catch (mailError) {
+      console.warn("Notification acheteurs (paye) non envoyee:", mailError?.message || mailError);
+    }
 
     // 📄 Générer PDF de la demande
     const outputPath = path.join(__dirname, `../../public/pdfs/demande_paiement_${demande_id}.pdf`);
@@ -219,12 +270,13 @@ const effectuerPaiement = async (req, res) => {
     }
 
     // 📝 Message
-    const sujet = achatMailSubject(demande.id, "PAIEMENT CONFIRME");
+    const sujet = formatDemandeMailSubject(demande.id, "PAIEMENT EFFECTUE");
+    const mailTitle = formatDemandeMailTitleHtml(demande.id);
     const message = `
       <p>Bonjour ${agent.nom},</p>
-      ${achatMailTitleHtml(demande.id)}
+      ${mailTitle}
       <p>Votre demande de paiement a été enregistrée comme <strong>payée</strong>.</p>
-      <p><strong>Moyen utilisé :</strong> ${moyen_paiement}</p>
+      <p><strong>Moyen utilisé :</strong> ${formatPaymentMethodLabel(moyen_paiement)}</p>
       <p>Veuillez trouver en pièces jointes :</p>
       <ul>
         <li>PDF de la demande</li>
@@ -233,7 +285,23 @@ const effectuerPaiement = async (req, res) => {
       </ul>
       <p>Cordialement,<br/>GreenPay CI</p>`;
 
-    await envoyerEmail(agent.utilisateurs.email, sujet, message, fichiersAttaches);
+    await envoyerEmail(agent.utilisateurs.email, sujet, message, fichiersAttaches, ccEmails);
+    try {
+      const stakeholderUserIds = await getStakeholderUserIdsFromAgent(agent);
+      if (stakeholderUserIds.length) {
+        await createNotificationsForUsers({
+          utilisateurIds: stakeholderUserIds,
+          demandeId: Number(demande.id),
+          message: formatDemandeInAppMessage(
+            demande.id,
+            "PAIEMENT EFFECTUE",
+            `Moyen de paiement: ${formatPaymentMethodLabel(moyen_paiement)}.`
+          ),
+        });
+      }
+    } catch (notifyError) {
+      console.warn("Notif in-app paiement (non bloquant):", notifyError?.message || notifyError);
+    }
 
     res.status(201).json({ message: "✅ Paiement effectué et email envoyé avec succès.", paiement });
 
@@ -274,3 +342,5 @@ module.exports = {
   effectuerPaiement,
   getPaiementByDemande,
 };
+
+

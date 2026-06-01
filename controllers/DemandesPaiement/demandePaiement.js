@@ -1,49 +1,86 @@
 // controllers/DemandesPaiement/demandePaiement.js
 const { PrismaClient, paiements_moyen_paiement } = require("@prisma/client");
-const cloudinary = require("../../config/cloudinaryConfig");
 const prisma = new PrismaClient();
 const { envoyerEmail } = require("../../config/emailConfig");
 const jwt = require("jsonwebtoken");
 const { extname } = require("path");
+const { saveBufferToLocalFile } = require("../../utils/localUpload");
+const { PAYMENT_METHOD_VALUES, formatPaymentMethodLabel } = require("../../utils/paymentLabels");
+const { notifyAcheteursDemandeEnAttenteAchat } = require("../../utils/achatWorkflowNotifications");
+const {
+  formatDemandeMailSubject,
+  formatDemandeMailTitleHtml,
+  formatDemandeInAppMessage,
+} = require("../../utils/demandeMailFormat");
+const {
+  createNotificationForUser,
+  createNotificationsForUsers,
+} = require("../../utils/inAppNotifications");
 
 // === Helper e-mail: wrapper direct vers envoyerEmail (avec CC)
 async function sendEmail(to, subject, html, attachments = [], ccEmails = []) {
   return envoyerEmail(to, subject, html, attachments, ccEmails);
 }
 
-const achatDemandeRef = (id) => `ACHAT - DEMANDE #${id}`;
-const achatMailSubject = (id, action = "") =>
-  action ? `${achatDemandeRef(id)} - ${action}` : achatDemandeRef(id);
-const achatMailTitleHtml = (id) =>
-  `<p style="margin:0 0 12px;font-weight:700;text-transform:uppercase;">${achatDemandeRef(id)}</p>`;
-
-// === Upload Cloudinary
-const uploadToCloudinary = (fileBuffer) => {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder: "proformas", resource_type: "auto" },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result.secure_url);
-      }
-    );
-    stream.end(fileBuffer);
-  });
+const uploadProformaLocal = async (req, file) => {
+  const saved = await saveBufferToLocalFile(req, file.buffer, file.originalname || "proforma", "proformas");
+  return saved.url;
 };
 
-const uploadToCloudinaryPaiements = (fileBuffer) => {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { folder: "paiements", resource_type: "auto" },
-      (error, result) => {
-        if (error) reject(error);
-        else resolve(result.secure_url);
-      }
-    );
-    stream.end(fileBuffer);
-  });
+const uploadPaiementLocal = async (req, file) => {
+  const saved = await saveBufferToLocalFile(req, file.buffer, file.originalname || "document_paiement", "paiements");
+  return saved.url;
 };
 
+const STATUS_LABELS = {
+  validation_section: "validation section",
+  validation_entite: "validation entité",
+  validation_entite_finance: "validation entité finance",
+  validation_entite_generale: "validation entité générale",
+  approuve: "approuvé",
+  paye: "payé",
+  achat_effectue: "achat effectué",
+  cloture: "clôturé",
+  rejete: "rejeté",
+  en_attente_paiement: "en attente de paiement",
+};
+
+const formatStatutLabel = (statut) => {
+  const key = String(statut || "").trim().toLowerCase();
+  return STATUS_LABELS[key] || key.replace(/_/g, " ");
+};
+
+const toPositiveInt = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return Math.floor(num);
+};
+
+const uniquePositiveIds = (values = []) =>
+  Array.from(
+    new Set(
+      (values || [])
+        .map((value) => toPositiveInt(value))
+        .filter((value) => value != null)
+    )
+  );
+
+const notifyInAppUsers = async ({
+  utilisateurIds = [],
+  demandeId,
+  action,
+  detail = "",
+}) => {
+  const ids = uniquePositiveIds(utilisateurIds);
+  const id = toPositiveInt(demandeId);
+  if (!ids.length || !id) return;
+
+  await createNotificationsForUsers({
+    utilisateurIds: ids,
+    demandeId: id,
+    message: formatDemandeInAppMessage(id, action, detail),
+  });
+};
 // === Helpers hiérarchie & destinataires
 const ROLES_EXCLUS = [
   "Responsable Entité Générale",
@@ -90,7 +127,8 @@ async function buildRecipientsChain(demande) {
       entite_id: agent.entite_id,
     });
   } else if (f.includes("Responsable d'entité")) {
-    superieurAgent = await findAgent({ fonctionContains: "Directeur" });
+    // Chercher le directeur de la même entité (éviter directeur global)
+    superieurAgent = await findAgent({ fonctionContains: "Directeur", entite_id: agent.entite_id });
   }
 
   const [directeurAgent, dgAgent, dafAgent] = await Promise.all([
@@ -217,60 +255,157 @@ function collectPaymentDocFilesFromReq(req) {
   return out;
 }
 
+const normalizeFonctionText = (value = "") =>
+  String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+const getFonctionFlags = (fonction = "") => {
+  const f = normalizeFonctionText(fonction);
+  const isReg =
+    f.includes("responsable entite generale") || /(^|\s)reg($|\s)/.test(f);
+  const isRef =
+    f.includes("responsable entite financiere") ||
+    f.includes("directeur administratif et financier") ||
+    f.includes("directrice administrative et financiere") ||
+    /(^|\s)ref($|\s)/.test(f);
+  const isDg =
+    f.includes("directeur general") || f.includes("directrice generale");
+  const isDirecteurLike =
+    (f.includes("directeur") || f.includes("directrice")) && !isRef && !isDg;
+  const isRespEntite =
+    (f.includes("responsable d entite") || f.includes("responsable entite")) &&
+    !isReg &&
+    !isRef;
+  const isRespSection = f.includes("responsable de section");
+
+  return {
+    isReg,
+    isRef,
+    isDg,
+    isDirecteurLike,
+    isRespEntite,
+    isRespSection,
+  };
+};
+
+const getStatutFromValidatorFonction = (fonction = "") => {
+  const {
+    isReg,
+    isRef,
+    isDg,
+    isDirecteurLike,
+    isRespEntite,
+    isRespSection,
+  } = getFonctionFlags(fonction);
+
+  if (isRespSection) return "validation_section";
+  if (isRespEntite || isDirecteurLike || isDg) return "validation_entite";
+  if (isReg) return "validation_entite_generale";
+  if (isRef) return "validation_entite_finance";
+  return null;
+};
+
 // === Détermination du statut/validateur initial
 const determinerValidateurInitial = async (agent) => {
+  // 1) Priorite au superieur hierarchique reel si renseigne
+  const flags = getFonctionFlags(agent.fonction || "");
+  const isDirecteurDemandeur = flags.isDirecteurLike;
+
+  // Cas exceptionnel: un Directeur qui initie sa propre demande.
+  // Il ne se valide pas lui-meme: passage direct en validation_entite_generale.
+  if (isDirecteurDemandeur) {
+    return {
+      statutInitial: "validation_entite_generale",
+      validateurInitial: null,
+    };
+  }
+
+  if (agent.superieur_id) {
+    const superieur = await prisma.agents.findUnique({
+      where: { id: Number(agent.superieur_id) },
+    });
+    if (superieur) {
+      const statutViaSuperieur = getStatutFromValidatorFonction(superieur.fonction || "");
+      if (statutViaSuperieur) {
+        return {
+          statutInitial: statutViaSuperieur,
+          validateurInitial: superieur,
+        };
+      }
+    }
+  }
+
+  // 2) Fallback sur la logique historique si pas de superieur exploitable
   let statutInitial = "validation_section";
   let validateurInitial = null;
 
-  if (agent.fonction.includes("Agent")) {
+  if (flags.isRespSection) {
+    statutInitial = "validation_entite";
+    validateurInitial = await prisma.agents.findFirst({
+      where: {
+        entite_id: agent.entite_id,
+        fonction: { contains: "Responsable d'entit" },
+      },
+    });
+  } else if (flags.isRespEntite || flags.isDg || flags.isDirecteurLike) {
+    statutInitial = "validation_entite_generale";
+    validateurInitial = await prisma.agents.findFirst({
+      where: { fonction: { contains: "Entit" } },
+      orderBy: { id: "asc" },
+    });
+  } else if (flags.isReg) {
+    statutInitial = "validation_entite_finance";
+    validateurInitial = await prisma.agents.findFirst({
+      where: { fonction: { contains: "Financi" } },
+      orderBy: { id: "asc" },
+    });
+  } else if (flags.isRef) {
+    statutInitial = "validation_entite_generale";
+    validateurInitial = await prisma.agents.findFirst({
+      where: { fonction: { contains: "Generale" } },
+      orderBy: { id: "asc" },
+    });
+  } else {
     validateurInitial = await prisma.agents.findFirst({
       where: { section_id: agent.section_id, fonction: "Responsable de section" },
     });
-  } else if (agent.fonction.includes("Responsable de section")) {
-    statutInitial = "validation_entite";
-    validateurInitial = await prisma.agents.findFirst({
-      where: { entite_id: agent.entite_id, fonction: "Responsable d'entité" },
-    });
-  } else if (agent.fonction.includes("Responsable d'entité")) {
+  }
+
+  if (!validateurInitial && (flags.isDirecteurLike || flags.isRespEntite || flags.isDg)) {
     statutInitial = "validation_entite_generale";
-    validateurInitial = await prisma.agents.findFirst({
-      where: { fonction: "Responsable Entité Générale" },
-    });
-  } else if (agent.fonction.includes("Responsable Entité Générale")) {
-    statutInitial = "validation_entite_finance";
-    validateurInitial = await prisma.agents.findFirst({
-      where: { fonction: "Responsable Entité Financière" },
-    });
-  } else if (agent.fonction.includes("Responsable Entité Financière")) {
-    statutInitial = "validation_entite_generale";
-    validateurInitial = await prisma.agents.findFirst({
-      where: { fonction: "Responsable Entité Générale" },
-    });
   }
 
   return { statutInitial, validateurInitial };
 };
 
-// === Création d’une demande (avec PJ proformas)
+// === Création d'une demande (avec PJ proformas)
 const creerDemandePaiement = async (req, res) => {
-  let { agent_id, montant, motif, requiert_proforma, beneficiaire } = req.body;
+  let { agent_id, montant, motif, note, remarque, requiert_proforma, beneficiaire } = req.body;
 
   const agentIdNum = parseInt(agent_id);
   const montantNum = parseFloat(montant);
+  const noteValue = String(note ?? remarque ?? "").trim();
   const requiertProformaBool =
     typeof requiert_proforma === "string"
       ? requiert_proforma.toLowerCase() === "true"
       : Boolean(requiert_proforma);
 
   const proformaFiles = collectProformaFilesFromReq(req);
-  console.log("📥 Proformas reçues:", proformaFiles.map(f => `${f.fieldname}:${f.originalname}`));
+  console.log("[INFO] Proformas recues:", proformaFiles.map(f => `${f.fieldname}:${f.originalname}`));
 
   try {
     const agent = await prisma.agents.findUnique({ where: { id: agentIdNum } });
     if (!agent) return res.status(404).json({ message: "Agent non trouvé." });
+    const demandeurFlags = getFonctionFlags(agent.fonction || "");
+    const canSetRemark = demandeurFlags.isRespEntite || demandeurFlags.isDirecteurLike;
+    const finalNoteValue = canSetRemark ? noteValue : "";
 
     const { statutInitial, validateurInitial } = await determinerValidateurInitial(agent);
-    if (!validateurInitial) {
+    if (!validateurInitial && statutInitial !== "validation_entite_generale") {
       return res.status(400).json({ message: "Aucun validateur initial trouvé pour cette demande." });
     }
 
@@ -282,23 +417,46 @@ const creerDemandePaiement = async (req, res) => {
     let proformaUrls = [];
     if (proformaFiles.length > 0) {
       for (const f of proformaFiles) {
-        const url = await uploadToCloudinary(f.buffer);
+        const url = await uploadProformaLocal(req, f);
         proformaUrls.push(url);
       }
     }
 
     // Transaction: création demande + proformas
     const demandeCree = await prisma.$transaction(async (tx) => {
-      const demande = await tx.demandes_paiement.create({
-        data: {
-          agent_id: agentIdNum,
-          montant: isNaN(montantNum) ? 0 : montantNum,
-          motif,
-          beneficiaire,
-          statut: statutInitial,
-          requiert_proforma: requiertProformaBool,
-        },
-      });
+      let demande = null;
+      const baseData = {
+        agent_id: agentIdNum,
+        montant: isNaN(montantNum) ? 0 : montantNum,
+        motif,
+        beneficiaire,
+        statut: statutInitial,
+        requiert_proforma: requiertProformaBool,
+      };
+
+      try {
+        demande = await tx.demandes_paiement.create({
+          data: {
+            ...baseData,
+            note: finalNoteValue || null,
+          },
+        });
+      } catch (createError) {
+        const msg = String(createError?.message || "");
+        const isMissingNoteColumn =
+          createError?.code === "P2022" &&
+          (msg.toLowerCase().includes("note") || msg.toLowerCase().includes("column"));
+        const isUnknownNoteArg =
+          msg.toLowerCase().includes("unknown argument") &&
+          msg.toLowerCase().includes("note");
+
+        if (!isMissingNoteColumn && !isUnknownNoteArg) throw createError;
+
+        console.warn(
+          "[WARN] Champ 'note' indisponible (colonne absente ou client Prisma non regenere). Création sans remarque."
+        );
+        demande = await tx.demandes_paiement.create({ data: baseData });
+      }
 
       if (proformaUrls.length > 0) {
         await tx.proformas.createMany({
@@ -312,18 +470,27 @@ const creerDemandePaiement = async (req, res) => {
       return demande;
     });
 
-    // Mail au validateur
-    const validateur = await prisma.utilisateurs.findFirst({
-      where: { agent_id: validateurInitial.id },
+    // Mail + notification in-app au validateur (si etape applicative)
+    const demandeurUser = await prisma.utilisateurs.findFirst({
+      where: { agent_id: agentIdNum },
       include: { agents: true },
     });
 
+    const validateur =
+      validateurInitial?.id != null
+        ? await prisma.utilisateurs.findFirst({
+            where: { agent_id: validateurInitial.id },
+            include: { agents: true },
+          })
+        : null;
+
     if (validateur) {
       const validationURL = `https://achats.greenpayci.com/valider/${demandeCree.id}`;
-      const sujet = achatMailSubject(demandeCree.id, "NOUVELLE DEMANDE");
+      const sujet = formatDemandeMailSubject(demandeCree.id, "NOUVELLE DEMANDE");
+      const mailTitle = formatDemandeMailTitleHtml(demandeCree.id);
       const message = `
         <p>Bonjour ${validateur.agents.nom},</p>
-        ${achatMailTitleHtml(demandeCree.id)}
+        ${mailTitle}
         <p>Une nouvelle demande de paiement a été créée par <strong>${agent.nom}</strong>.</p>
         <p><strong>Montant :</strong> ${montantNum || montant} FCFA</p>
         <p><strong>Motif :</strong> ${motif}</p>
@@ -331,7 +498,7 @@ const creerDemandePaiement = async (req, res) => {
         <p style="text-align: center;">
           <a href="${validationURL}" 
             style="background-color:#1463ff;color:#fff;padding:10px 20px;text-decoration:none;font-weight:bold;border-radius:6px;">
-            ✅ Ouvrir la demande
+            Ouvrir la demande
           </a>
         </p>
       `;
@@ -339,21 +506,69 @@ const creerDemandePaiement = async (req, res) => {
         inferAttachmentFromUrl(url, `proforma_${i + 1}`)
       );
       await sendEmail(validateur.email, sujet, message, attachments);
+
+      try {
+        await createNotificationForUser({
+          utilisateurId: validateur.id,
+          demandeId: demandeCree.id,
+          message: formatDemandeInAppMessage(
+            demandeCree.id,
+            "VALIDATION REQUISE",
+            `Nouvelle demande de ${agent.nom}`
+          ),
+        });
+      } catch (notifyError) {
+        console.warn("Notif in-app validateur (non bloquant):", notifyError?.message || notifyError);
+      }
+    }
+
+    if (demandeurUser?.id) {
+      try {
+        await createNotificationForUser({
+          utilisateurId: demandeurUser.id,
+          demandeId: demandeCree.id,
+          message: formatDemandeInAppMessage(
+            demandeCree.id,
+            "NOUVELLE DEMANDE",
+            "Votre demande a ete enregistree."
+          ),
+        });
+      } catch (notifyError) {
+        console.warn("Notif in-app demandeur (non bloquant):", notifyError?.message || notifyError);
+      }
+    }
+
+    if (!validateur && statutInitial === "validation_entite_generale" && demandeurUser?.id) {
+      try {
+        await createNotificationForUser({
+          utilisateurId: demandeurUser.id,
+          demandeId: demandeCree.id,
+          message: formatDemandeInAppMessage(
+            demandeCree.id,
+            "ETAPE PAPIER REG",
+            "Imprimez puis faites signer la fiche."
+          ),
+        });
+      } catch (notifyError) {
+        console.warn("Notif in-app etape REG (non bloquant):", notifyError?.message || notifyError);
+      }
     }
 
     res.status(201).json({ message: "Demande créée avec succès.", demande: demandeCree });
   } catch (error) {
-    console.error("❌ Erreur :", error);
+    console.error("[ERREUR] Erreur :", error);
     res.status(500).json({ message: "Erreur serveur.", error: error.message || error });
   }
 };
 
-// === Modification d’une demande (REG, paiements, docs libres après paye)
+// === Modification d'une demande (REG, paiements, docs libres après paye)
 const modifierDemandePaiement = async (req, res) => {
   const { demande_id } = req.params;
   const {
     montant,
     motif,
+    note,
+    remarque,
     requiert_proforma,
     beneficiaire,
     statut,                   // optionnel
@@ -365,6 +580,10 @@ const modifierDemandePaiement = async (req, res) => {
   const demandeIdNum = parseInt(demande_id, 10);
   const montantNum = montant != null ? parseFloat(montant) : undefined;
   const motifRejet = String(motif_rejet || "").trim();
+  const hasNoteInPayload =
+    Object.prototype.hasOwnProperty.call(req.body, "note") ||
+    Object.prototype.hasOwnProperty.call(req.body, "remarque");
+  const noteValue = hasNoteInPayload ? String(note ?? remarque ?? "").trim() : null;
 
   const requiertProformaBool =
     typeof requiert_proforma === "string"
@@ -379,7 +598,7 @@ const modifierDemandePaiement = async (req, res) => {
   let docArray = Array.isArray(docsRaw) ? docsRaw : docsRaw ? [docsRaw] : [];
   let typeArray = Array.isArray(typesRaw) ? typesRaw : typesRaw ? [typesRaw] : [];
 
-  // Fichiers uploadés (on push leurs URLs après Cloudinary)
+  // Fichiers uploadés (on push leurs URLs après upload)
   const payDocFiles = collectPaymentDocFilesFromReq(req);
 
   // Paiements (nouveau JSON)
@@ -417,11 +636,16 @@ const modifierDemandePaiement = async (req, res) => {
       include: { proformas: true, validations: true, agents: true },
     });
     if (!demande) return res.status(404).json({ message: "Demande non trouvée." });
+    const demandeurFlags = getFonctionFlags(demande?.agents?.fonction || "");
+    const canUpdateRemark = demandeurFlags.isRespEntite || demandeurFlags.isDirecteurLike;
 
     const nextStatut = statut ?? demande.statut;
     const fromEnAttenteToRejete =
       String(demande.statut || "").toLowerCase() === "en_attente_paiement" &&
       String(statut || "").toLowerCase() === "rejete";
+    const fromAchatEffectueToCloture =
+      String(demande.statut || "").toLowerCase() === "achat_effectue" &&
+      String(statut || "").toLowerCase() === "cloture";
 
     // Contrôle transitions si changement explicite
     if (statut && statut !== demande.statut) {
@@ -430,11 +654,12 @@ const modifierDemandePaiement = async (req, res) => {
         validation_entite: ["validation_entite"],
         validation_entite_generale: ["en_attente_paiement", "paye", "rejete"],
         en_attente_paiement: ["paye", "rejete"],
+        achat_effectue: ["cloture"],
       };
       const possibles = transitionsAutorisees[demande.statut] || [];
       if (!possibles.includes(statut)) {
         return res.status(400).json({
-          message: `Changement de statut non autorisé : '${demande.statut}' → '${statut}'.`,
+          message: `Changement de statut non autorisé : '${demande.statut}' -> '${statut}'.`,
         });
       }
     }
@@ -444,7 +669,7 @@ const modifierDemandePaiement = async (req, res) => {
     if (proformaFilesReq.length > 0) {
       for (const f of proformaFilesReq) {
         if (!f?.buffer) continue;
-        const url = await uploadToCloudinary(f.buffer);
+        const url = await uploadProformaLocal(req, f);
         proformaNewUploads.push({ url, originalname: f.originalname || null });
       }
     }
@@ -453,7 +678,7 @@ const modifierDemandePaiement = async (req, res) => {
     if (payDocFiles.length > 0) {
       for (const f of payDocFiles) {
         if (!f?.buffer) continue;
-        const url = await uploadToCloudinaryPaiements(f.buffer);
+        const url = await uploadPaiementLocal(req, f);
         docArray.push(url);
         const singleType = req.body.type;
         const t = singleType ?? (Array.isArray(typesRaw) ? typesRaw[typeArray.length] : typesRaw) ?? "autre";
@@ -485,10 +710,18 @@ const modifierDemandePaiement = async (req, res) => {
       }
     }
 
-    const authUser = fromEnAttenteToRejete ? await getAuthUserFromToken(req) : null;
-    if (fromEnAttenteToRejete && !authUser?.id) {
+    const authUser =
+      fromEnAttenteToRejete || fromAchatEffectueToCloture
+        ? await getAuthUserFromToken(req)
+        : null;
+    if ((fromEnAttenteToRejete || fromAchatEffectueToCloture) && !authUser?.id) {
       return res.status(401).json({
-        message: "Utilisateur authentifié requis pour rejeter cette demande.",
+        message: "Utilisateur authentifie requis pour cette action.",
+      });
+    }
+    if (fromAchatEffectueToCloture && Number(authUser.agent_id) !== Number(demande.agent_id)) {
+      return res.status(403).json({
+        message: "Seul l'initiateur de la demande peut la cloturer.",
       });
     }
 
@@ -510,11 +743,12 @@ const modifierDemandePaiement = async (req, res) => {
         }
       }
 
-      // 🔑 FIX TRIGGER: si on passe en "paye", on met ce statut AVANT de créer paiements/documents
+      // FIX TRIGGER: si on passe en "paye", on met ce statut AVANT de créer paiements/documents
       if (statut === "paye" && demande.statut !== "paye") {
         const earlyUpdate = {};
         if (montant != null) earlyUpdate.montant = isNaN(montantNum) ? demande.montant : montantNum;
         if (motif != null) earlyUpdate.motif = motif;
+        if (hasNoteInPayload && canUpdateRemark) earlyUpdate.note = noteValue || null;
         if (beneficiaire != null) earlyUpdate.beneficiaire = beneficiaire;
         if (requiertProformaBool !== undefined) earlyUpdate.requiert_proforma = requiertProformaBool;
 
@@ -546,6 +780,9 @@ const modifierDemandePaiement = async (req, res) => {
           // Nouveau format structuré par paiement
           for (const p of paiementsPayload) {
             if (!p?.moyen_paiement) continue;
+            if (!PAYMENT_METHOD_VALUES.includes(p.moyen_paiement)) {
+              throw new Error("Moyen de paiement invalide.");
+            }
             const paiement = await tx.paiements.create({
               data: { demande_id: demandeIdNum, moyen_paiement: p.moyen_paiement },
             });
@@ -574,6 +811,9 @@ const modifierDemandePaiement = async (req, res) => {
                 "Aucun paiement trouvé pour cette demande. Fournissez 'moyen_paiement' ou passez la demande au statut 'paye'."
               );
             }
+            if (moyen_paiement && !PAYMENT_METHOD_VALUES.includes(moyen_paiement)) {
+              throw new Error("Moyen de paiement invalide.");
+            }
             const created = await tx.paiements.create({
               data: { demande_id: demandeIdNum, moyen_paiement: moyen_paiement || "especes" },
             });
@@ -583,6 +823,9 @@ const modifierDemandePaiement = async (req, res) => {
           }
         } else if (moyen_paiement && statut === "paye") {
           // PAYE sans docs: on crée quand même le paiement si demandé
+          if (!PAYMENT_METHOD_VALUES.includes(moyen_paiement)) {
+            throw new Error("Moyen de paiement invalide.");
+          }
           await tx.paiements.create({
             data: { demande_id: demandeIdNum, moyen_paiement },
           });
@@ -623,10 +866,11 @@ const modifierDemandePaiement = async (req, res) => {
       const dataToUpdate = { statut: nextStatut };
       if (montant != null) dataToUpdate.montant = isNaN(montantNum) ? demande.montant : montantNum;
       if (motif != null) dataToUpdate.motif = motif;
+      if (hasNoteInPayload && canUpdateRemark) dataToUpdate.note = noteValue || null;
       if (beneficiaire != null) dataToUpdate.beneficiaire = beneficiaire;
       if (requiertProformaBool !== undefined) dataToUpdate.requiert_proforma = requiertProformaBool;
 
-      // ⚠️ On a déjà mis 'paye' plus haut pour satisfaire le trigger
+      // On a déjà mis 'paye' plus haut pour satisfaire le trigger
       if (statut === "paye") delete dataToUpdate.statut;
 
       const updated = await tx.demandes_paiement.update({
@@ -641,6 +885,26 @@ const modifierDemandePaiement = async (req, res) => {
 
       return updated;
     }, { timeout: 20000, maxWait: 5000 });
+    const actorUser = authUser?.id ? authUser : await getAuthUserFromToken(req);
+    const actorName = actorUser?.agents?.nom ? actorUser.agents.nom : null;
+    const statusKey = String(statut || "").toLowerCase();
+    const hasBusinessModification =
+      montant != null ||
+      motif != null ||
+      (hasNoteInPayload && canUpdateRemark) ||
+      beneficiaire != null ||
+      requiertProformaBool !== undefined ||
+      proformaNewUploads.length > 0 ||
+      removeProformaIds.length > 0 ||
+      docArray.length > 0 ||
+      paiementsPayload.length > 0 ||
+      Boolean(moyen_paiement);
+    const isStatusHandledBySpecificNotif = [
+      "en_attente_paiement",
+      "paye",
+      "rejete",
+      "cloture",
+    ].includes(statusKey);
 
     // ========= E-MAILS POST-TRANSACTION =========
     try {
@@ -649,6 +913,13 @@ const modifierDemandePaiement = async (req, res) => {
       const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
 
       const lien = appLienDemande(result.id);
+      const stakeholdersIds = uniquePositiveIds([
+        chainData?.demandeur?.id,
+        chainData?.superieur?.id,
+        chainData?.directeur?.id,
+        chainData?.dg?.id,
+        chainData?.daf?.id,
+      ]);
 
       if (statut === "en_attente_paiement") {
         const to =
@@ -665,20 +936,21 @@ const modifierDemandePaiement = async (req, res) => {
           emailOf(chainData.dg),
         ]).filter((e) => e !== to);
 
-        const sujet = achatMailSubject(result.id, "EN ATTENTE DE PAIEMENT");
+        const sujet = formatDemandeMailSubject(result.id, "EN ATTENTE DE PAIEMENT");
+        const mailTitle = formatDemandeMailTitleHtml(result.id);
         const message = `
           <p>Bonjour,</p>
-          ${achatMailTitleHtml(result.id)}
+          ${mailTitle}
           <p>La demande <strong>#${result.id}</strong> est <strong>en attente de paiement</strong>.</p>
           <p><strong>Montant :</strong> ${result.montant} FCFA<br/>
              <strong>Motif :</strong> ${result.motif}<br/>
-             <strong>Demandeur :</strong> ${result?.agents?.nom || "—"}</p>
+             <strong>Demandeur :</strong> ${result?.agents?.nom || "-"}</p>
           ${
             result.demande_physique_signee_url
               ? `<p>Document REG signé : <a href="${result.demande_physique_signee_url}">ouvrir</a></p>`
               : ""
           }
-          <p><a href="${lien}">✅ Ouvrir la demande</a></p>
+          <p><a href="${lien}">Ouvrir la demande</a></p>
         `;
 
         const attachments = result.demande_physique_signee_url
@@ -686,6 +958,13 @@ const modifierDemandePaiement = async (req, res) => {
           : [];
 
         if (to) await sendEmail(to, sujet, message, attachments, cc);
+
+        await notifyInAppUsers({
+          utilisateurIds: stakeholdersIds,
+          demandeId: result.id,
+          action: "EN ATTENTE DE PAIEMENT",
+          detail: "La demande est prete pour traitement financier.",
+        });
       }
 
       if (statut === "paye") {
@@ -705,19 +984,20 @@ const modifierDemandePaiement = async (req, res) => {
         const paiementsListHtml = (result.paiements || [])
           .map(
             (p) =>
-              `<li>${p.moyen_paiement || "—"} — ${(p.documents_paiements || []).length} document(s)</li>`
+              `<li>${formatPaymentMethodLabel(p.moyen_paiement)} - ${(p.documents_paiements || []).length} document(s)</li>`
           )
           .join("");
 
-        const sujet = achatMailSubject(result.id, "PAIEMENT EFFECTUE");
+        const sujet = formatDemandeMailSubject(result.id, "PAIEMENT EFFECTUE");
+        const mailTitle = formatDemandeMailTitleHtml(result.id);
         const message = `
           <p>Bonjour,</p>
-          ${achatMailTitleHtml(result.id)}
+          ${mailTitle}
           <p>Le paiement de la demande <strong>#${result.id}</strong> a été <strong>effectué</strong>.</p>
           <p><strong>Montant :</strong> ${result.montant} FCFA<br/>
              <strong>Motif :</strong> ${result.motif}</p>
           ${paiementsListHtml ? `<p><strong>Détails du/des paiement(s) :</strong></p><ul>${paiementsListHtml}</ul>` : ""}
-          <p><a href="${lien}">📄 Voir la demande</a></p>
+          <p><a href="${lien}">Voir la demande</a></p>
         `;
 
         const attachments = [];
@@ -730,6 +1010,19 @@ const modifierDemandePaiement = async (req, res) => {
         }
 
         if (to) await sendEmail(to, sujet, message, attachments, cc);
+
+        await notifyInAppUsers({
+          utilisateurIds: stakeholdersIds,
+          demandeId: result.id,
+          action: "PAIEMENT EFFECTUE",
+          detail: "La demande est en attente d'achat.",
+        });
+
+        try {
+          await notifyAcheteursDemandeEnAttenteAchat({ demandeId: result.id });
+        } catch (mailError) {
+          console.warn("Notification acheteurs (paye) non envoyee:", mailError?.message || mailError);
+        }
       }
 
       if (statut === "rejete") {
@@ -746,10 +1039,11 @@ const modifierDemandePaiement = async (req, res) => {
           emailOf(chainData.daf),
         ]).filter((e) => e && e !== to);
 
-        const sujet = achatMailSubject(result.id, "REJETEE");
+        const sujet = formatDemandeMailSubject(result.id, "REJETEE");
+        const mailTitle = formatDemandeMailTitleHtml(result.id);
         const message = `
           <p>Bonjour,</p>
-          ${achatMailTitleHtml(result.id)}
+          ${mailTitle}
           <p>La demande <strong>#${result.id}</strong> a été <strong>rejetée</strong>.</p>
           <p><strong>Montant :</strong> ${result.montant} FCFA<br/>
              <strong>Motif (demande) :</strong> ${result.motif}</p>
@@ -758,7 +1052,7 @@ const modifierDemandePaiement = async (req, res) => {
               ? `<p><strong>Motif du rejet :</strong> ${motifRejet}</p>`
               : ""
           }
-          <p><a href="${lien}">🔎 Consulter la demande</a></p>
+          <p><a href="${lien}">Consulter la demande</a></p>
         `;
 
         const attachments = (result.proformas || []).map((p, i) =>
@@ -773,6 +1067,35 @@ const modifierDemandePaiement = async (req, res) => {
         }
 
         if (to) await sendEmail(to, sujet, message, attachments, cc);
+
+        await notifyInAppUsers({
+          utilisateurIds: stakeholdersIds,
+          demandeId: result.id,
+          action: "REJETEE",
+          detail: fromEnAttenteToRejete
+            ? "Demande rejetee apres etape paiement."
+            : "Demande rejetee par un validateur.",
+        });
+      }
+
+      if (String(statut || "").toLowerCase() === "cloture") {
+        await notifyInAppUsers({
+          utilisateurIds: stakeholdersIds,
+          demandeId: result.id,
+          action: "CLOTUREE",
+          detail: "Demande cloturee par l'initiateur.",
+        });
+      }
+
+      if (hasBusinessModification && !isStatusHandledBySpecificNotif) {
+        await notifyInAppUsers({
+          utilisateurIds: stakeholdersIds,
+          demandeId: result.id,
+          action: "MODIFICATION",
+          detail: actorName
+            ? `Demande mise a jour par ${actorName}.`
+            : "Demande mise a jour.",
+        });
       }
     } catch (e) {
       console.warn("Notifications (non bloquant) :", e?.message || e);
@@ -784,7 +1107,7 @@ const modifierDemandePaiement = async (req, res) => {
       ...(fromEnAttenteToRejete ? { reject_attachments: rejectJustifUrls } : {}),
     });
   } catch (error) {
-    console.error("🔥 Erreur :", error);
+    console.error("[ERREUR] Erreur :", error);
     return res.status(500).json({ message: "Erreur serveur", error: error.message || String(error) });
   }
 };
@@ -801,6 +1124,31 @@ const supprimerDemandePaiement = async (req, res) => {
 
     if (!demande)
       return res.status(404).json({ message: "Demande non trouvée." });
+
+    // Autorisation : vérifier que l'utilisateur peut voir cette demande
+    const authUser = await getAuthUserFromToken(req);
+    if (!authUser || !authUser.agents) {
+      return res.status(401).json({ message: "Utilisateur non authentifié." });
+    }
+
+    const isOwner = Number(authUser.agents.id) === Number(demande.agent_id);
+    const sameEntite = Boolean(authUser.agents.entite_id && demande.agents && authUser.agents.entite_id === demande.agents.entite_id);
+
+    const allowedFonctions = [
+      "Responsable d'entité",
+      "Responsable Entité Générale",
+      "Responsable Entité Financière",
+      "Directeur",
+      "Directeur Général",
+      "Directeur Administratif et Financier",
+    ];
+
+    const isValidatorFonction = authUser.agents && allowedFonctions.some((fn) => (authUser.agents.fonction || "").includes(fn));
+    const isAdminRole = userHasAnyRole(authUser, ["Admin"]);
+
+    if (!isOwner && !isAdminRole && !(sameEntite && isValidatorFonction)) {
+      return res.status(403).json({ message: "Accès interdit : vous ne pouvez pas voir cette demande." });
+    }
 
     if (demande.validations.length > 0) {
       return res.status(400).json({ message: "Demande déjà validée." });
@@ -867,24 +1215,31 @@ const getAllDemandesPaiement = async (req, res) => {
   try {
     const utilisateur = await prisma.utilisateurs.findUnique({
       where: { id: Number(utilisateur_id) },
-      include: { agents: true },
+      include: { agents: true, utilisateur_roles: { include: { roles: true } } },
     });
 
     if (!utilisateur)
       return res.status(404).json({ message: "Utilisateur non trouvé." });
 
+    if (!utilisateur.agents || utilisateur.agents.entite_id == null) {
+      return res.status(400).json({ message: "Utilisateur sans entité rattachée." });
+    }
+
+    const entiteId = Number(utilisateur.agents.entite_id);
+    const whereEntite = {
+      agents: { entite_id: entiteId },
+      deleted_at: null,
+    };
+
     const demandes = await prisma.demandes_paiement.findMany({
       skip: Number(offset),
       take: Number(limit),
       orderBy: { date_creation: "desc" },
-      where: {
-        agents: { entite_id: parseInt(utilisateur.agents.entite_id) },
-        deleted_at: null,
-      },
+      where: whereEntite,
       include: { agents: true, proformas: true, validations: true },
     });
 
-    const totalDemandes = await prisma.demandes_paiement.count();
+    const totalDemandes = await prisma.demandes_paiement.count({ where: whereEntite });
     const totalPages = Math.ceil(totalDemandes / limit);
     res.json({ demandes, totalPages });
   } catch (error) {
@@ -900,6 +1255,7 @@ const getDemandePaiementById = async (req, res) => {
       include: {
         agents: true,
         proformas: true,
+        achats: { include: { preuves_achat: true, utilisateurs: { include: { agents: true } } } },
         paiements: { include: { documents_paiements: true } },
         validations: { include: { utilisateurs: { include: { agents: true } } } },
       },
@@ -930,9 +1286,19 @@ const getAuthUserFromToken = async (req) => {
   if (!payload || !payload.userId) return null;
   return prisma.utilisateurs.findUnique({
     where: { id: payload.userId },
-    include: { agents: true },
+    include: { agents: true, utilisateur_roles: { include: { roles: true } } },
   });
 };
+
+function userHasAnyRole(user, roleNames = []) {
+  if (!user || !Array.isArray(user.utilisateur_roles)) return false;
+  const wanted = new Set(roleNames.map((r) => String(r).toLowerCase()));
+  for (const ur of user.utilisateur_roles) {
+    const rn = ur?.roles?.nom;
+    if (rn && wanted.has(String(rn).toLowerCase())) return true;
+  }
+  return false;
+}
 
 const demandesCountByUser = async (req, res) => {
   try {
@@ -1295,7 +1661,7 @@ const exporterDemandesPaiementExcel = async (req, res) => {
     };
 
     const rows = demandes.map((d) => {
-      const moyensPaiement = (d.paiements || []).map((p) => p.moyen_paiement).join(" | ");
+      const moyensPaiement = (d.paiements || []).map((p) => formatPaymentMethodLabel(p.moyen_paiement)).join(" | ");
       const nbDocsPaiement = (d.paiements || []).reduce(
         (acc, p) => acc + ((p.documents_paiements || []).length || 0),
         0
@@ -1311,7 +1677,7 @@ const exporterDemandesPaiementExcel = async (req, res) => {
         d.beneficiaire || "",
         Number(d.montant || 0),
         d.motif || "",
-        d.statut || "",
+        formatStatutLabel(d.statut),
         d.requiert_proforma ? "oui" : "non",
         d.proformas?.length || 0,
         d.paiements?.length || 0,
@@ -1353,4 +1719,5 @@ module.exports = {
   getAllDemandesPaiement,
   exporterDemandesPaiementExcel,
 };
+
 

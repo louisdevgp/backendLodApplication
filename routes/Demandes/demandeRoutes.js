@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const {uploads} = require("../../utils/upload")
-const { uploadFile } = require("../../controllers/Upload/cloudinaryController");
+const { uploadFile } = require("../../controllers/Upload/localUploadController");
 const {
     creerDemandePaiement,
     modifierDemandePaiement,
