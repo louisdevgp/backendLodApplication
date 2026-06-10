@@ -1,5 +1,6 @@
 // Import des modules nécessaires
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const { PrismaClient } = require('@prisma/client');
 const dotenv = require('dotenv');
@@ -27,6 +28,14 @@ const rolesRoutes = require("./routes/Roles/roleRoutes")
 
 // Configuration de l'environnement
 dotenv.config();
+
+const runtimeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
+if (runtimeEnv) {
+    const runtimeEnvPath = path.resolve(process.cwd(), `.env.${runtimeEnv}`);
+    if (fs.existsSync(runtimeEnvPath)) {
+        dotenv.config({ path: runtimeEnvPath, override: true });
+    }
+}
 
 // Initialisation de l'application Express
 const app = express();
