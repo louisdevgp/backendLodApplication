@@ -43,6 +43,53 @@ const buildPublicUrl = (req, relativePath) => {
   return `${getPublicBaseUrl(req)}/uploads/${publicPath}`;
 };
 
+const resolveLocalFileFromUrlish = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return { ok: false, reason: "Source vide." };
+
+  let pathname = raw.replace(/\\/g, "/");
+
+  if (/^https?:\/\//i.test(pathname)) {
+    try {
+      pathname = new URL(pathname).pathname;
+    } catch {
+      return { ok: false, reason: "URL invalide." };
+    }
+  }
+
+  const normalized = pathname.startsWith("/")
+    ? pathname
+    : `/${pathname.replace(/^\/+/, "")}`;
+  const marker = "/uploads/";
+  const index = normalized.toLowerCase().indexOf(marker);
+  if (index === -1) {
+    return { ok: false, reason: "Chemin hors uploads locaux." };
+  }
+
+  const relativeUrlPath = normalized.slice(index + marker.length);
+  const parts = relativeUrlPath
+    .split("/")
+    .map((part) => decodeURIComponent(part))
+    .filter(Boolean);
+
+  if (!parts.length) {
+    return { ok: false, reason: "Fichier introuvable." };
+  }
+
+  const root = path.resolve(UPLOAD_ROOT);
+  const absolutePath = path.resolve(UPLOAD_ROOT, ...parts);
+  if (!absolutePath.startsWith(root + path.sep) && absolutePath !== root) {
+    return { ok: false, reason: "Chemin invalide." };
+  }
+
+  return {
+    ok: true,
+    absolutePath,
+    parts,
+    filename: parts[parts.length - 1],
+  };
+};
+
 const saveBufferToLocalFile = async (req, buffer, originalname = "fichier", folder = "documents") => {
   if (!buffer) throw new Error("Fichier vide ou invalide.");
 
@@ -90,6 +137,7 @@ module.exports = {
   ensureUploadDir,
   saveBufferToLocalFile,
   deleteLocalFileByUrl,
+  resolveLocalFileFromUrlish,
   sanitizeFileName,
   normalizeFolder,
 };

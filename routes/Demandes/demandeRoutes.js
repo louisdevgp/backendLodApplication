@@ -15,6 +15,7 @@ const {
     demandesCountByResponsableEntite,
     getAllDemandesPaiement,
     exporterDemandesPaiementExcel,
+    viewDocument,
 } = require("../../controllers/DemandesPaiement/demandePaiement");
 const {
   ajouterProformas,
@@ -52,6 +53,7 @@ router.put(
 );
 // ✅ Route pour uploader de fichier
 router.post("/upload", upload.single("file"), uploadFile);
+router.get("/view-document", viewDocument);
 
 // ✅ Route pour supprimer une demande de paiement (soft delete)
 router.delete("/deleteDemandePaiement/:demande_id", supprimerDemandePaiement);

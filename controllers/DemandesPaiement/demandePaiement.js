@@ -4,7 +4,10 @@ const prisma = new PrismaClient();
 const { envoyerEmail } = require("../../config/emailConfig");
 const jwt = require("jsonwebtoken");
 const { extname } = require("path");
-const { saveBufferToLocalFile } = require("../../utils/localUpload");
+const {
+  saveBufferToLocalFile,
+  resolveLocalFileFromUrlish,
+} = require("../../utils/localUpload");
 const { PAYMENT_METHOD_VALUES, formatPaymentMethodLabel } = require("../../utils/paymentLabels");
 const { notifyAcheteursDemandeEnAttenteAchat } = require("../../utils/achatWorkflowNotifications");
 const {
@@ -1705,6 +1708,36 @@ const exporterDemandesPaiementExcel = async (req, res) => {
   }
 };
 
+const viewDocument = async (req, res) => {
+  try {
+    const source = String(req.query.url || req.query.path || "").trim();
+    const resolved = resolveLocalFileFromUrlish(source);
+
+    if (!resolved.ok) {
+      return res.status(400).json({ message: resolved.reason || "Document invalide." });
+    }
+
+    const { absolutePath, filename } = resolved;
+    const exists = await require("fs").promises
+      .access(absolutePath)
+      .then(() => true)
+      .catch(() => false);
+
+    if (!exists) {
+      return res.status(404).json({ message: "Document introuvable." });
+    }
+
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${encodeURIComponent(filename || "document")}"`
+    );
+    return res.sendFile(absolutePath);
+  } catch (error) {
+    console.error("Erreur viewDocument:", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+};
+
 module.exports = {
   creerDemandePaiement,
   modifierDemandePaiement,
@@ -1718,6 +1751,7 @@ module.exports = {
   demandesCountByResponsableEntite,
   getAllDemandesPaiement,
   exporterDemandesPaiementExcel,
+  viewDocument,
 };
 
 
